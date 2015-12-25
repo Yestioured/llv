@@ -3,10 +3,12 @@
 import os
 from PIL import Image, ImageDraw, ImageFont
 from datetime import date, timedelta, datetime
+from collections import OrderedDict
 
 from django.shortcuts import render, redirect
 from django.views.decorators.csrf import csrf_exempt
 from django.http import Http404
+from django.core.cache import cache
 from django.conf import settings
 from django.db.models import Q
 from aggregate_if import Count
@@ -59,10 +61,11 @@ def contexto_home(destaques, eventos, ofertas, mais_paginas, shopping, com_filtr
         eventos_x = eventos
         ofertas_x = ofertas
 
-    for i in destaques_x+eventos_x+ofertas_x:
-        if i.get('genero', None) and i['genero'].lower() not in generos:
-            generos.append(i['genero'])
-        desconto = int(i['desconto']) if i.get('desconto', None) else None
+    lojas_dict = {}
+    for i in Oferta.itens_por_shopping(shopping=shopping.id):
+        if i.genero and Oferta.GENEROS[i.genero][1].lower() not in generos:
+            generos.append(Oferta.GENEROS[i.genero][1])
+        desconto = int(i.desconto) if i.desconto else None
         if desconto:
             if not tem_trinta and desconto <= 30:
                 trinta = tem_trinta = True
@@ -71,7 +74,7 @@ def contexto_home(destaques, eventos, ofertas, mais_paginas, shopping, com_filtr
             if not tem_setenta and desconto > 50:
                 setenta = tem_setenta = True
 
-        preco = int(i['preco_final']) if i.get('preco_final', None) else None
+        preco = int(i.preco_final) if i.preco_final else None
         if preco:
             if not tem_preco1 and preco <= 30:
                 preco1 = tem_preco1 = True
@@ -83,6 +86,33 @@ def contexto_home(destaques, eventos, ofertas, mais_paginas, shopping, com_filtr
                 preco4 = tem_preco4 = True
             if not tem_preco5 and preco > 300:
                 preco5 = tem_preco5 = True
+        if i.loja:
+            lojas_dict[i.loja.slug] = i.loja.nome
+    #for i in destaques_x+eventos_x+ofertas_x:
+    #    if i.get('genero', None) and i['genero'].lower() not in generos:
+    #        generos.append(i['genero'])
+    #    desconto = int(i['desconto']) if i.get('desconto', None) else None
+    #    if desconto:
+    #        if not tem_trinta and desconto <= 30:
+    #            trinta = tem_trinta = True
+    #        if not tem_cinq and desconto > 30 and desconto <= 50:
+    #            cinquenta = tem_cinq = True
+    #        if not tem_setenta and desconto > 50:
+    #            setenta = tem_setenta = True
+    #    if i.get('loja', None):
+    #        lojas_dict[i['loja']['slug']] = i['loja']['nome'] 
+    #    preco = int(i['preco_final']) if i.get('preco_final', None) else None
+    #    if preco:
+    #        if not tem_preco1 and preco <= 30:
+    #            preco1 = tem_preco1 = True
+    #        if not tem_preco2 and preco > 30 and preco <= 50:
+    #            preco2 = tem_preco2 = True
+    #        if not tem_preco3 and preco > 50 and preco <= 100:
+    #            preco3 = tem_preco3 = True
+    #        if not tem_preco4 and preco > 100 and preco <= 300:
+    #            preco4 = tem_preco4 = True
+    #        if not tem_preco5 and preco > 300:
+    #            preco5 = tem_preco5 = True
 
     return {'destaques': destaques,
             'ultimo_destaque_id': [int(d['id']) for d in destaques],
@@ -92,7 +122,8 @@ def contexto_home(destaques, eventos, ofertas, mais_paginas, shopping, com_filtr
             'ultima_oferta_id': [int(o['id']) for o in ofertas],
             'categorias': Categoria.publicadas_com_oferta(shopping.id),
             'mais_paginas': mais_paginas,
-            'lojas': Loja.publicadas_com_oferta(shopping=shopping.id),
+            #'lojas': Loja.publicadas_com_oferta(shopping=shopping.id),
+            'lojas_dict': OrderedDict(sorted(lojas_dict.items(), key=lambda n: n[1])),
             'lojas_splash': Loja.publicadas_sem_oferta(shopping=shopping.id),
             'sazonal': Sazonal.atual(shopping=shopping.id),
             'shopping_id': shopping.id,
@@ -128,7 +159,7 @@ def home(request, **kwargs):
 
 def split_ids(valores):
     if valores:
-        return [int(i) for i in valores.split(', ')]
+        return [int(''.join(i.split('.'))) for i in valores.split(', ')]
     return []
 
 @indica_shopping
@@ -312,33 +343,52 @@ def mais_items(ids_para_filtrar, tipo, id_shopping):
         corte = 32
     else:
         corte = 3
+
+    # cache_key = 'MAIS_%s_%s_%s' % (id_shopping, tipo, ''.join(map(str, ids_para_filtrar)))
+    # cache_mais = cache.get(cache_key)
+
+    # if cache_mais:
+    #     return cache_mais
+    # else:
     items = Oferta.objects.filter(loja__shopping_id=id_shopping,
                                   tipo=tipo,
                                   status=Oferta.PUBLICADO,
                                   inicio__lte=hoje, fim__gte=hoje) \
                            .exclude(id__in=ids_para_filtrar) \
                            .order_by('-data_aprovacao')[:corte]
-    # items = Oferta.objects.filter(tipo=tipo,status=Oferta.PUBLICADO)\
-    #                       .filter(Q(loja__shopping_id=id_shopping) |
-    #                               Q(shopping_id=id_shopping)) \
-    #                       .filter(inicio__lte=hoje,fim__gte=hoje) \
-    #                       .exclude(id__in=ids_para_filtrar) \
-    #                       .order_by('-data_aprovacao')[:corte]
-    items_final = []
-    for i in items:
-        items_final.append(i.to_dict())
-
+        # items = Oferta.objects.filter(tipo=tipo,status=Oferta.PUBLICADO)\
+        #                       .filter(Q(loja__shopping_id=id_shopping) |
+        #                               Q(shopping_id=id_shopping)) \
+        #                       .filter(inicio__lte=hoje,fim__gte=hoje) \
+        #                       .exclude(id__in=ids_para_filtrar) \
+        #                       .order_by('-data_aprovacao')[:corte]
+        # items_final = []
+        # for i in items:
+        #     items_final.append(i.to_dict())
+        # cache.set(cache_key, items_final)
+    items_final = [i.to_dict() for i in items]
     return items_final
 
 def limpa_ids(valores):
-    return [int(''.join(i.split('.'))) for i in valores.split(', ')]
-
+    ids = []
+    for i in valores.split(', '):
+        limpa = i.replace('.','')
+        if limpa:
+	    try:
+		id_inteiro = int(limpa)
+		ids.append(id_inteiro)
+	    except:
+		pass
+    #return [int(''.join(i.split('.'))) for i in valores.split(', ')]
+    #return ids
+    return [ int(float(i.replace('.',''))) for i in valores.split(', ')]
 @csrf_exempt
 def mais_ofertas(request):
     ultimo_destaque = request.POST.get('ultimo_destaque', None)
     ultimo_evento = request.POST.get('ultimo_evento', None)
     ultima_oferta = request.POST.get('ultima_oferta', None)
-    id_shopping = request.COOKIES.get('shp_id', None)
+    id_shopping_cookie = request.COOKIES.get('shp_id', None)
+    id_shopping = request.POST.get('shopping_id', id_shopping_cookie)
 
     destaques = eventos = ofertas = ultimo_destaque_id = ultimo_evento_id = ultima_oferta_id = []
     total_destaques = total_eventos = 0
@@ -369,7 +419,8 @@ def mais_ofertas(request):
                 'ofertas': ofertas,
                 'ultima_oferta_id': ultima_oferta_id,
                 'mais_paginas': mais_paginas,
-                'eh_paginacao': True}
+                'eh_paginacao': True,
+                'shopping_id': id_shopping}
 
     return render(request, "home-part.html", contexto)
 
